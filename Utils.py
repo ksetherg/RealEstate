@@ -2,10 +2,10 @@ from bs4 import BeautifulSoup
 import requests
 from fake_useragent import UserAgent
 import re
-# import pymorphy2
 import pandas as pd
 import numpy as np
 import ast
+# import pymorphy2
 # from selenium import webdriver
 # from webdriver_manager.chrome import ChromeDriverManager
 
@@ -23,10 +23,12 @@ req_params = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,i
               'referrer': 'https://google.com'
               }
 
+ua = UserAgent(verify_ssl=False, cache=False)
 
-def get_html_page(url, params=req_params):
+
+def get_html_page(url, user_agent=ua, params=req_params):
     ses = requests.Session()
-    header = {'User-Agent': str(UserAgent(cache=False).random), **params}
+    header = {'User-Agent': user_agent.random, **params}
     raw_html = ses.get(url, headers=header)
     raw_html.raise_for_status()
     html_text = raw_html.text.encode(raw_html.encoding)
@@ -35,47 +37,59 @@ def get_html_page(url, params=req_params):
 
 
 def split_to_offers(soup):
+    offers = []
     offers_raw = soup.find_all('div', {'data-name': 'Offers'})
-    offers = offers_raw[0].find_all('article', {'data-name': 'CardComponent'})
+    if offers_raw:
+        offers = offers_raw[0].find_all('article', {'data-name': 'CardComponent'})
     return offers
 
 
 def get_offer_title(offer_soup):
-    offer_title = offer_soup.select("span[data-mark='OfferTitle']")[0].text
+    offer_title = None
+    if offer_soup.select("span[data-mark='OfferTitle']"):
+        offer_title = offer_soup.select("span[data-mark='OfferTitle']")[0].text
     return offer_title
 
 
 def get_offer_subtitle(offer_soup):
+    offer_subtitle = None
     if offer_soup.select("span[data-mark='OfferSubtitle']"):
         offer_subtitle = offer_soup.select("span[data-mark='OfferSubtitle']")[0].text
-    else:
-        offer_subtitle = None
     return offer_subtitle
 
 
 def parse_title_info(title):
-    title = title.lower()
-    raw = title.replace(',', '.').split()
-    if 'м²' in raw:
-        idx = raw.index('м².')
-        meters = float(raw[idx - 1])
-    else:
-        meters = np.nan
+    rooms = np.nan
+    meters = np.nan
+    floor = np.nan
+    total_floor = np.nan
 
-    rooms_raw = raw[0]
-    if 'комн' in rooms_raw:
-        rooms = int(rooms_raw.split('-')[0])
-    elif 'студия' in rooms_raw:
-        rooms = 0
-    else:
-        rooms = np.nan
+    if title is not None:
+        title = title.lower().replace(',', '.')
+        raw = title.split()
+        if 'м².' in raw:
+            idx = raw.index('м².')
+            meters = int(float(raw[idx - 1]))
 
-    floor, floors = raw[-2].split('/')
+        rooms_raw = raw[0]
+        if 'комн' in rooms_raw:
+            rooms = rooms_raw.split('комн')[0]
+            if '-' in rooms:
+                rooms = int(rooms.split('-')[0])
+            else:
+                rooms = int(rooms)
+        elif 'студия' in rooms_raw:
+            rooms = 0
+        else:
+            rooms = np.nan
+
+        if 'этаж' in raw:
+            floor, total_floor = int(raw[-2].split('/')[0]), int(raw[-2].split('/')[1])
 
     return {'rooms': rooms,
             'meters': meters,
-            'floor': int(floor),
-            'total_floor': int(floors)}
+            'floor': floor,
+            'total_floor': total_floor}
 
 
 def get_general_info(offer_soup):
@@ -86,12 +100,11 @@ def get_general_info(offer_soup):
 
 
 def get_author(offer_soup):
+    author = None
     if offer_soup.select("a[data-name='AgentTitle']"):
         author = offer_soup.select("a[data-name='AgentTitle']")[0].text
     elif offer_soup.select("span[data-name='AgentTitle']"):
         author = offer_soup.select("span[data-name='AgentTitle']")[0].text
-    else:
-        author = None
     return {'author': author}
 
 
@@ -100,6 +113,7 @@ def get_author(offer_soup):
 #     res = re.split('(\d+)', station_raw)
 #     #farness = res[1]
 #     return res[0]
+
 
 def get_full_address(offer_soup):
     address = []
@@ -123,35 +137,43 @@ def get_full_address(offer_soup):
         address_dict = {'region': address[0],
                         'zone': address[1],
                         'district': address[2],
-                        'metro': np.nan,
+                        'metro': address[-3],
                         'street': address[-2],
                         'house': address[-1]}
     return address_dict
 
 
 def get_price(offer_soup):
-    price_raw = offer_soup.select("span[data-mark='MainPrice']")[0].text
-    price = price_raw.split("₽/мес")[0][:-1].replace(' ', '')
-    return {'price': int(price)}
+    price = np.nan
+    if offer_soup.select("span[data-mark='MainPrice']"):
+        price_raw = offer_soup.select("span[data-mark='MainPrice']")[0].text
+        price = int(price_raw.split("₽")[0][:-1].replace(' ', ''))
+    return {'price': price}
 
 
 def get_price_additional_info(offer_soup):
-    desc_raw = offer_soup.select("p[data-mark='PriceInfo']")[0].text
+    commission = np.nan
+    collateral = np.nan
+    if offer_soup.select("p[data-mark='PriceInfo']"):
+        desc_raw = offer_soup.select("p[data-mark='PriceInfo']")[0].text
+        if "%" in desc_raw:
+            commission = int(desc_raw[desc_raw.find("%") - 2: desc_raw.find("%")].replace(" ", ""))
+        else:
+            commission = 0
 
-    if "%" in desc_raw:
-        commission = int(desc_raw[desc_raw.find("%") - 2: desc_raw.find("%")].replace(" ", ""))
-    else:
-        commission = 0
+        if "\xa0₽" in desc_raw:
+            collateral = int(re.split('(\d+)', desc_raw.split('\xa0₽')[0].replace(' ', ''))[-2])
+        else:
+            collateral = 0
 
-    if "\xa0₽" in desc_raw:
-        collateral = int(re.split('(\d+)', desc_raw.split('\xa0₽')[0].replace(' ', ''))[-2])
-    else:
-        collateral = 0
     return {'commission': commission, 'collateral': collateral}
 
 
 def get_link(offer_soup):
-    link = offer_soup.select("div[data-name='LinkArea']")[0].select("a")[0].get('href')
+    link = np.nan
+    if offer_soup.select("div[data-name='LinkArea']"):
+        if offer_soup.select("div[data-name='LinkArea']")[0].select("a"):
+            link = offer_soup.select("div[data-name='LinkArea']")[0].select("a")[0].get('href')
     return {'link': link}
 
 
@@ -184,9 +206,7 @@ def incept_from_offer(offer_soup):
     return df
 
 
-def scrap_page(url):
-    soup = get_html_page(url)
-    offers = split_to_offers(soup)
+def scrap_page(offers):
     dfs = []
     for offer in offers:
         df = incept_from_offer(offer)
@@ -208,10 +228,16 @@ def scrap_cian(url_base, from_page, to_page):
     for i in range(from_page, to_page):
         print(f'Current page = {i}/{to_page}')
         url_i = build_url_page(url_base, i)
+        soup_i = None
         try:
-            df_offers = scrap_page(url_i)
-            dfs.extend(df_offers)
+            soup_i = get_html_page(url_i)
         except Exception as e:
-            print(f'Error with loading page = {i}')
-            print(e)
+            print(f'Error with loading page = {i}. {e}')
+
+        if soup_i:
+            offers_i = split_to_offers(soup_i)
+            df_offers = scrap_page(offers_i)
+            dfs.extend(df_offers)
+        else:
+            continue
     return pd.concat(dfs)
